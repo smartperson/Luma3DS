@@ -37,17 +37,12 @@ DSTATUS disk_initialize (
 	BYTE pdrv				/* Physical drive nmuber to identify the drive */
 )
 {
-        switch(pdrv)
-        {
-            case SDCARD:
-                sdmmc_sdcard_init();
-                break;
-            case CTRNAND:
-                ctrNandInit();
-                break;
-        }
+        static u32 sdmmcInitResult = 4;
 
-	return RES_OK;
+        if(sdmmcInitResult == 4) sdmmcInitResult = sdmmc_sdcard_init();
+
+	return ((pdrv == SDCARD && !(sdmmcInitResult & 2)) ||
+                (pdrv == CTRNAND && !(sdmmcInitResult & 1) && !ctrNandInit())) ? 0 : STA_NOINIT;
 }
 
 
@@ -63,19 +58,8 @@ DRESULT disk_read (
 	UINT count		/* Number of sectors to read */
 )
 {
-        switch(pdrv)
-        {
-            case SDCARD:
-                if(sdmmc_sdcard_readsectors(sector, count, (BYTE *)buff))
-		    return RES_PARERR;
-                break;
-            case CTRNAND:
-                if(ctrNandRead(sector, count, (BYTE *)buff))
-		    return RES_PARERR;
-                break;
-        }
-
-        return RES_OK;
+        return ((pdrv == SDCARD && !sdmmc_sdcard_readsectors(sector, count, buff)) ||
+                (pdrv == CTRNAND && !ctrNandRead(sector, count, buff))) ? RES_OK : RES_PARERR;
 }
 
 
@@ -92,10 +76,8 @@ DRESULT disk_write (
 	UINT count			/* Number of sectors to write */
 )
 {
-        if(pdrv == SDCARD && sdmmc_sdcard_writesectors(sector, count, (BYTE *)buff))
-            return RES_PARERR;
-
-        return RES_OK;
+        return ((pdrv == SDCARD && !sdmmc_sdcard_writesectors(sector, count, buff)) ||
+                (pdrv == CTRNAND && !ctrNandWrite(sector, count, buff))) ? RES_OK : RES_PARERR;
 }
 #endif
 

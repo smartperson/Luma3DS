@@ -1,6 +1,6 @@
 /*
 *   This file is part of Luma3DS
-*   Copyright (C) 2016 Aurora Wright, TuxSH
+*   Copyright (C) 2016-2017 Aurora Wright, TuxSH
 *
 *   This program is free software: you can redistribute it and/or modify
 *   it under the terms of the GNU General Public License as published by
@@ -15,9 +15,13 @@
 *   You should have received a copy of the GNU General Public License
 *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *
-*   Additional Terms 7.b of GPLv3 applies to this file: Requiring preservation of specified
-*   reasonable legal notices or author attributions in that material or in the Appropriate Legal
-*   Notices displayed by works containing it.
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
 */
 
 #pragma once
@@ -39,9 +43,9 @@
 #define BUTTON_UP              (1 << 6)
 #define BUTTON_DOWN            (1 << 7)
 
+#define DPAD_BUTTONS           (BUTTON_LEFT | BUTTON_RIGHT | BUTTON_UP | BUTTON_DOWN)
 #define SAFE_MODE              (BUTTON_R1 | BUTTON_L1 | BUTTON_A | BUTTON_UP)
-#define SINGLE_PAYLOAD_BUTTONS (BUTTON_LEFT | BUTTON_RIGHT | BUTTON_UP | BUTTON_DOWN | BUTTON_START | BUTTON_B | BUTTON_X | BUTTON_Y)
-#define L_PAYLOAD_BUTTONS      (BUTTON_R1 | BUTTON_A | BUTTON_SELECT)
-#define EMUNAND_BUTTONS        (BUTTON_LEFT | BUTTON_RIGHT | BUTTON_UP | BUTTON_DOWN)
-#define MENU_BUTTONS           (BUTTON_LEFT | BUTTON_RIGHT | BUTTON_UP | BUTTON_DOWN | BUTTON_A | BUTTON_START)
-#define PIN_BUTTONS            (BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_Y | BUTTON_LEFT | BUTTON_RIGHT | BUTTON_UP | BUTTON_DOWN | BUTTON_START)
+#define SINGLE_PAYLOAD_BUTTONS (DPAD_BUTTONS | BUTTON_B | BUTTON_X | BUTTON_Y)
+#define L_PAYLOAD_BUTTONS      (BUTTON_R1 | BUTTON_A | BUTTON_START | BUTTON_SELECT)
+#define MENU_BUTTONS           (DPAD_BUTTONS | BUTTON_A | BUTTON_START)
+#define PIN_BUTTONS            (BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_Y | DPAD_BUTTONS | BUTTON_START | BUTTON_SELECT)

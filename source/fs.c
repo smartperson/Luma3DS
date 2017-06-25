@@ -1,6 +1,6 @@
 /*
 *   This file is part of Luma3DS
-*   Copyright (C) 2016 Aurora Wright, TuxSH
+*   Copyright (C) 2016-2017 Aurora Wright, TuxSH
 *
 *   This program is free software: you can redistribute it and/or modify
 *   it under the terms of the GNU General Public License as published by
@@ -15,28 +15,53 @@
 *   You should have received a copy of the GNU General Public License
 *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *
-*   Additional Terms 7.b of GPLv3 applies to this file: Requiring preservation of specified
-*   reasonable legal notices or author attributions in that material or in the Appropriate Legal
-*   Notices displayed by works containing it.
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
 */
 
 #include "fs.h"
 #include "memory.h"
 #include "strings.h"
+#include "fmt.h"
 #include "crypto.h"
 #include "cache.h"
 #include "screen.h"
+#include "draw.h"
+#include "utils.h"
 #include "fatfs/ff.h"
 #include "buttons.h"
+#include "firm.h"
+#include "crypto.h"
 #include "../build/bundled.h"
 
 static FATFS sdFs,
              nandFs;
 
-void mountFs(void)
+static bool switchToMainDir(bool isSd)
 {
-    f_mount(&sdFs, "0:", 1);
-    f_mount(&nandFs, "1:", 0);
+    const char *mainDir = isSd ? "/luma" : "/rw/luma";
+
+    switch(f_chdir(mainDir))
+    {
+        case FR_OK:
+            return true;
+        case FR_NO_PATH:
+            f_mkdir(mainDir);
+            return switchToMainDir(isSd);
+        default:
+            return false;
+    }
+}
+
+bool mountFs(bool isSd, bool switchToCtrNand)
+{
+    return isSd ? f_mount(&sdFs, "0:", 1) == FR_OK && switchToMainDir(true) :
+                  f_mount(&nandFs, "1:", 1) == FR_OK && (!switchToCtrNand || (f_chdrive("1:") == FR_OK && switchToMainDir(false)));
 }
 
 u32 fileRead(void *dest, const char *path, u32 maxSize)
@@ -44,14 +69,13 @@ u32 fileRead(void *dest, const char *path, u32 maxSize)
     FIL file;
     u32 ret = 0;
 
-    if(f_open(&file, path, FA_READ) == FR_OK)
-    {
-        u32 size = f_size(&file);
-        if(dest == NULL) ret = size;
-        else if(!(maxSize > 0 && size > maxSize))
-            f_read(&file, dest, size, (unsigned int *)&ret);
-        f_close(&file);
-    }
+    if(f_open(&file, path, FA_READ) != FR_OK) return ret;
+
+    u32 size = f_size(&file);
+    if(dest == NULL) ret = size;
+    else if(size <= maxSize)
+        f_read(&file, dest, size, (unsigned int *)&ret);
+    f_close(&file);
 
     return ret;
 }
@@ -65,33 +89,31 @@ bool fileWrite(const void *buffer, const char *path, u32 size)
 {
     FIL file;
 
-    FRESULT result = f_open(&file, path, FA_WRITE | FA_OPEN_ALWAYS);
-
-    if(result == FR_OK)
+    switch(f_open(&file, path, FA_WRITE | FA_OPEN_ALWAYS))
     {
-        unsigned int written;
-        f_write(&file, buffer, size, &written);
-        f_truncate(&file);
-        f_close(&file);
+        case FR_OK:
+        {
+            unsigned int written;
+            f_write(&file, buffer, size, &written);
+            f_truncate(&file);
+            f_close(&file);
 
-        return true;
+            return (u32)written == size;
+        }
+        case FR_NO_PATH:
+            for(u32 i = 1; path[i] != 0; i++)
+                if(path[i] == '/')
+                {
+                    char folder[i + 1];
+                    memcpy(folder, path, i);
+                    folder[i] = 0;
+                    f_mkdir(folder);
+                }
+
+            return fileWrite(buffer, path, size);
+        default:
+            return false;
     }
-
-    if(result == FR_NO_PATH)
-    {
-        for(u32 i = 1; path[i] != 0; i++)
-           if(path[i] == '/')
-           {
-                char folder[i + 1];
-                memcpy(folder, path, i);
-                folder[i] = 0;
-                f_mkdir(folder);
-           }
-
-        return fileWrite(buffer, path, size);
-    }
-
-    return false;
 }
 
 void fileDelete(const char *path)
@@ -99,7 +121,7 @@ void fileDelete(const char *path)
     f_unlink(path);
 }
 
-void loadPayload(u32 pressed)
+bool findPayload(char *path, u32 pressed)
 {
     const char *pattern;
 
@@ -117,70 +139,143 @@ void loadPayload(u32 pressed)
 
     DIR dir;
     FILINFO info;
-    char path[28] = "/luma/payloads";
+    FRESULT result;
 
-    FRESULT result = f_findfirst(&dir, &info, path, pattern);
+    result = f_findfirst(&dir, &info, "payloads", pattern);
+
+    if(result != FR_OK) return false;
 
     f_closedir(&dir);
 
-    if(result == FR_OK && info.fname[0] != 0)
+    if(!info.fname[0]) return false;
+
+    sprintf(path, "payloads/%s", info.fname);
+
+    return true;
+}
+
+bool payloadMenu(char *path)
+{
+    DIR dir;
+
+    if(f_opendir(&dir, "payloads") != FR_OK) return false;
+
+    FILINFO info;
+    u32 payloadNum = 0;
+    char payloadList[20][49];
+
+    while(f_readdir(&dir, &info) == FR_OK && info.fname[0] != 0 && payloadNum < 20)
     {
-        u32 *loaderAddress = (u32 *)0x24FFFF00;
-        u8 *payloadAddress = (u8 *)0x24F00000;
+        if(info.fname[0] == '.') continue;
 
-        memcpy(loaderAddress, loader_bin, loader_bin_size);
+        u32 nameLength = strlen(info.fname);
 
-        concatenateStrings(path, "/");
-        concatenateStrings(path, info.altname);
+        if(nameLength < 6 || nameLength > 52) continue;
 
-        u32 payloadSize = fileRead(payloadAddress, path, (u8 *)loaderAddress - payloadAddress);
+        nameLength -= 5;
 
-        if(payloadSize > 0)
+        if(memcmp(info.fname + nameLength, ".firm", 5) != 0) continue;
+
+        memcpy(payloadList[payloadNum], info.fname, nameLength);
+        payloadList[payloadNum][nameLength] = 0;
+        payloadNum++;
+    }
+
+    f_closedir(&dir);
+
+    if(!payloadNum) return false;
+
+    u32 pressed = 0,
+        selectedPayload = 0;
+
+    if(payloadNum != 1)
+    {
+        initScreens();
+
+        drawString(true, 10, 10, COLOR_TITLE, "Luma3DS chainloader");
+        drawString(true, 10, 10 + SPACING_Y, COLOR_TITLE, "Press A to select, START to quit");
+
+        for(u32 i = 0, posY = 10 + 3 * SPACING_Y, color = COLOR_RED; i < payloadNum; i++, posY += SPACING_Y)
         {
-            loaderAddress[1] = payloadSize;
+            drawString(true, 10, posY, color, payloadList[i]);
+            if(color == COLOR_RED) color = COLOR_WHITE;
+        }
 
-            if(isA9lh) restoreShaHashBackup();
-            initScreens();
+        while(pressed != BUTTON_A && pressed != BUTTON_START)
+        {
+            do
+            {
+                pressed = waitInput(true);
+            }
+            while(!(pressed & MENU_BUTTONS));
 
-            flushDCacheRange(loaderAddress, loader_bin_size);
-            flushICacheRange(loaderAddress, loader_bin_size);
+            u32 oldSelectedPayload = selectedPayload;
 
-            ((void (*)())loaderAddress)();
+            switch(pressed)
+            {
+                case BUTTON_UP:
+                    selectedPayload = !selectedPayload ? payloadNum - 1 : selectedPayload - 1;
+                    break;
+                case BUTTON_DOWN:
+                    selectedPayload = selectedPayload == payloadNum - 1 ? 0 : selectedPayload + 1;
+                    break;
+                case BUTTON_LEFT:
+                    selectedPayload = 0;
+                    break;
+                case BUTTON_RIGHT:
+                    selectedPayload = payloadNum - 1;
+                    break;
+                default:
+                    continue;
+            }
+
+            if(oldSelectedPayload == selectedPayload) continue;
+
+            drawString(true, 10, 10 + (3 + oldSelectedPayload) * SPACING_Y, COLOR_WHITE, payloadList[oldSelectedPayload]);
+            drawString(true, 10, 10 + (3 + selectedPayload) * SPACING_Y, COLOR_RED, payloadList[selectedPayload]);
         }
     }
+
+    if(pressed != BUTTON_START)
+    {
+        sprintf(path, "payloads/%s.firm", payloadList[selectedPayload]);
+
+        return true;
+    }
+
+    while(HID_PAD & MENU_BUTTONS);
+    wait(2000ULL);
+
+    return false;
 }
 
 u32 firmRead(void *dest, u32 firmType)
 {
-    const char *firmFolders[][2] = {{ "00000002", "20000002" },
-                                    { "00000102", "20000102" },
-                                    { "00000202", "20000202" },
-                                    { "00000003", "20000003" }};
+    const char *firmFolders[][2] = {{"00000002", "20000002"},
+                                    {"00000102", "20000102"},
+                                    {"00000202", "20000202"},
+                                    {"00000003", "20000003"},
+                                    {"00000001", "20000001"}};
 
-    char path[48] = "1:/title/00040138/";
-    concatenateStrings(path, firmFolders[firmType][isN3DS ? 1 : 0]);
-    concatenateStrings(path, "/content");
+    char folderPath[35],
+         path[48];
+
+    sprintf(folderPath, "1:/title/00040138/%s/content", firmFolders[firmType][ISN3DS ? 1 : 0]);
 
     DIR dir;
-    FILINFO info;
-
-    f_opendir(&dir, path);
-
     u32 firmVersion = 0xFFFFFFFF;
+
+    if(f_opendir(&dir, folderPath) != FR_OK) goto exit;
+
+    FILINFO info;
 
     //Parse the target directory
     while(f_readdir(&dir, &info) == FR_OK && info.fname[0] != 0)
     {
         //Not a cxi
-        if(info.fname[9] != 'a') continue;
+        if(info.fname[9] != 'a' || strlen(info.fname) != 12) continue;
 
-        //Convert the .app name to an integer
-        u32 tempVersion = 0;
-        for(char *tmp = info.altname; *tmp != '.'; tmp++)
-        {
-            tempVersion <<= 4;
-            tempVersion += *tmp > '9' ? *tmp - 'A' + 10 : *tmp - '0';
-        }
+        u32 tempVersion = hexAtoi(info.altname, 8);
 
         //Found an older cxi
         if(tempVersion < firmVersion) firmVersion = tempVersion;
@@ -188,38 +283,30 @@ u32 firmRead(void *dest, u32 firmType)
 
     f_closedir(&dir);
 
+    if(firmVersion == 0xFFFFFFFF) goto exit;
+
     //Complete the string with the .app name
-    concatenateStrings(path, "/00000000.app");
+    sprintf(path, "%s/%08x.app", folderPath, firmVersion);
 
-    //Convert back the .app name from integer to array
-    hexItoa(firmVersion, &path[35], 8);
+    if(fileRead(dest, path, 0x400000 + sizeof(Cxi) + 0x200) <= sizeof(Cxi) + 0x400) firmVersion = 0xFFFFFFFF;
 
-    fileRead(dest, path, 0);
-
+exit:
     return firmVersion;
 }
 
-void findDumpFile(const char *path, char *fileName)
+void findDumpFile(const char *folderPath, char *fileName)
 {
     DIR dir;
-    FILINFO info;
     FRESULT result;
-    u32 n = 0;
 
-    while(true)
+    for(u32 n = 0; n <= 99999999; n++)
     {
-        result = f_findfirst(&dir, &info, path, fileName);
+        FILINFO info;
+
+        sprintf(fileName, "crash_dump_%08u.dmp", n);
+        result = f_findfirst(&dir, &info, folderPath, fileName);
 
         if(result != FR_OK || !info.fname[0]) break;
-
-        u32 i = 18,
-            tmp = ++n;
-
-        while(tmp > 0)
-        {
-            fileName[i--] = '0' + (tmp % 10);
-            tmp /= 10;
-        }
     }
 
     if(result == FR_OK) f_closedir(&dir);

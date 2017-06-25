@@ -1,6 +1,6 @@
 /*
 *   This file is part of Luma3DS
-*   Copyright (C) 2016 Aurora Wright, TuxSH
+*   Copyright (C) 2016-2017 Aurora Wright, TuxSH
 *
 *   This program is free software: you can redistribute it and/or modify
 *   it under the terms of the GNU General Public License as published by
@@ -15,9 +15,17 @@
 *   You should have received a copy of the GNU General Public License
 *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *
-*   Additional Terms 7.b of GPLv3 applies to this file: Requiring preservation of specified
-*   reasonable legal notices or author attributions in that material or in the Appropriate Legal
-*   Notices displayed by works containing it.
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
+*/
+
+/*
+*   waitInput function based on code by d0k3 https://github.com/d0k3/Decrypt9WIP/blob/master/source/hid.c
 */
 
 #include "utils.h"
@@ -26,100 +34,114 @@
 #include "screen.h"
 #include "draw.h"
 #include "cache.h"
+#include "fmt.h"
+#include "strings.h"
+#include "fs.h"
 
-u32 waitInput(void)
+static void startChrono(void)
 {
-    bool pressedKey = false;
-    u32 key;
+    static bool isChronoStarted = false;
 
-    //Wait for no keys to be pressed
-    while(HID_PAD);
+    if(isChronoStarted) return;
 
-    do
+    REG_TIMER_CNT(0) = 0; //67MHz
+    for(u32 i = 1; i < 4; i++) REG_TIMER_CNT(i) = 4; //Count-up
+
+    for(u32 i = 0; i < 4; i++) REG_TIMER_VAL(i) = 0;
+
+    REG_TIMER_CNT(0) = 0x80; //67MHz; enabled
+    for(u32 i = 1; i < 4; i++) REG_TIMER_CNT(i) = 0x84; //Count-up; enabled
+
+    isChronoStarted = true;
+}
+
+static u64 chrono(void)
+{
+    u64 res = 0;
+    for(u32 i = 0; i < 4; i++) res |= REG_TIMER_VAL(i) << (16 * i);
+
+    res /= (TICKS_PER_SEC / 1000);
+
+    return res;
+}
+
+u32 waitInput(bool isMenu)
+{
+    static u64 dPadDelay = 0ULL;
+    u64 initialValue = 0ULL;
+    u32 key,
+        oldKey = HID_PAD;
+
+    if(isMenu)
     {
-        //Wait for a key to be pressed
-        while(!HID_PAD);
+        dPadDelay = dPadDelay > 0ULL ? 87ULL : 143ULL;
+        startChrono();
+        initialValue = chrono();
+    }
 
+    while(true)
+    {
         key = HID_PAD;
 
-        //Make sure it's pressed
-        for(u32 i = 0x13000; i > 0; i--)
+        if(!key)
         {
-            if(key != HID_PAD) break;
-            if(i == 1) pressedKey = true;
+            if((i2cReadRegister(I2C_DEV_MCU, 0x10) & 1)== 1) mcuPowerOff();
+            oldKey = 0;
+            dPadDelay = 0;
+            continue;
         }
+
+        if(key == oldKey && (!isMenu || (!(key & DPAD_BUTTONS) || chrono() - initialValue < dPadDelay))) continue;
+
+        //Make sure the key is pressed
+        u32 i;
+        for(i = 0; i < 0x13000 && key == HID_PAD; i++);
+        if(i == 0x13000) break;
     }
-    while(!pressedKey);
 
     return key;
 }
 
-void mcuReboot(void)
-{
-    if(!isFirmlaunch && PDN_GPU_CNT != 1) clearScreens(true, true, false);
-
-    //Ensure that all memory transfers have completed and that the data cache has been flushed
-    flushEntireDCache();
-
-    i2cWriteRegister(I2C_DEV_MCU, 0x20, 1 << 1);
-    while(true);
-}
-
 void mcuPowerOff(void)
 {
-    if(!isFirmlaunch && PDN_GPU_CNT != 1) clearScreens(true, true, false);
+    if(!isFirmlaunch && ARESCREENSINITIALIZED) clearScreens(false);
 
     //Ensure that all memory transfers have completed and that the data cache has been flushed
     flushEntireDCache();
-    
+
     i2cWriteRegister(I2C_DEV_MCU, 0x20, 1 << 0);
     while(true);
 }
 
-static inline void startChrono(u64 initialTicks)
+void wait(u64 amount)
 {
-    REG_TIMER_CNT(0) = 0; //67MHz
-    for(u32 i = 1; i < 4; i++) REG_TIMER_CNT(i) = 4; //Count-up
+    startChrono();
 
-    for(u32 i = 0; i < 4; i++) REG_TIMER_VAL(i) = (u16)(initialTicks >> (16 * i));
+    u64 initialValue = chrono();
 
-    REG_TIMER_CNT(0) = 0x80; //67MHz; enabled
-    for(u32 i = 1; i < 4; i++) REG_TIMER_CNT(i) = 0x84; //Count-up; enabled
+    while(chrono() - initialValue < amount);
 }
 
-static inline void stopChrono(void)
+void error(const char *fmt, ...)
 {
-    for(u32 i = 0; i < 4; i++) REG_TIMER_CNT(i) &= ~0x80;
-}
+    char buf[DRAW_MAX_FORMATTED_STRING_SIZE + 1];
 
-void chrono(u32 seconds)
-{
-    startChrono(0);
+    va_list args;
+    va_start(args, fmt);
+    vsprintf(buf, fmt, args);
+    va_end(args);
 
-    u64 startingTicks = 0;
-    for(u32 i = 0; i < 4; i++) startingTicks |= REG_TIMER_VAL(i) << (16 * i);
-
-    u64 res;
-    do
+    if(!isFirmlaunch)
     {
-        res = 0;
-        for(u32 i = 0; i < 4; i++) res |= REG_TIMER_VAL(i) << (16 * i);
+        initScreens();
+
+        drawString(true, 10, 10, COLOR_RED, "An error has occurred:");
+        u32 posY = drawString(true, 10, 30, COLOR_WHITE, buf);
+        drawString(true, 10, posY + 2 * SPACING_Y, COLOR_WHITE, "Press any button to shutdown");
+
+        waitInput(false);
     }
-    while(res - startingTicks < seconds * TICKS_PER_SEC);
+    else fileWrite(buf, "firmlauncherror.txt", strlen(buf));
 
-    stopChrono();
-}
-
-void error(const char *message)
-{
-    if(isFirmlaunch) mcuReboot();
-
-    initScreens();
-
-    drawString("An error has occurred:", true, 10, 10, COLOR_RED);
-    u32 posY = drawString(message, true, 10, 30, COLOR_WHITE);
-    drawString("Press any button to shutdown", true, 10, posY + 2 * SPACING_Y, COLOR_WHITE);
-
-    waitInput();
     mcuPowerOff();
 }
